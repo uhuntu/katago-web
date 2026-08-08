@@ -1,0 +1,355 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+<title>KataGo</title>
+<style>
+  html, body {
+    margin: 0; padding: 0; height: 100%;
+    background: #1b1f24; color: #e8e6e1;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    overscroll-behavior: none;
+    touch-action: manipulation;
+  }
+  #app { display: flex; flex-direction: column; height: 100%; }
+  header {
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 10px 14px; flex-shrink: 0;
+  }
+  header h1 { font-size: 18px; margin: 0; font-weight: 600; }
+  #status { font-size: 13px; color: #a9a49b; min-height: 18px; }
+  #evalbar-wrap {
+    padding: 0 14px 8px; flex-shrink: 0;
+  }
+  #evalbar {
+    height: 10px; border-radius: 5px; overflow: hidden;
+    display: flex; background: #111; border: 1px solid #3d434c;
+  }
+  #evalbar-black { background: #0a0a0a; height: 100%; transition: width 0.4s; }
+  #evalbar-white { background: #e8e6e1; height: 100%; transition: width 0.4s; }
+  #evallabel {
+    display: flex; justify-content: space-between;
+    font-size: 12px; color: #a9a49b; margin-top: 4px;
+  }
+  #pointloss {
+    font-size: 13px; font-weight: 600; min-height: 16px; margin-top: 2px;
+  }
+  #pointloss.good { color: #6fbf73; }
+  #pointloss.minor { color: #e0c34a; }
+  #pointloss.bad { color: #e0393e; }
+  #board-wrap {
+    flex: 1; display: flex; align-items: center; justify-content: center;
+    min-height: 0; padding: 4px;
+  }
+  canvas { touch-action: none; }
+  #controls {
+    display: flex; gap: 8px; padding: 10px 14px 14px;
+    flex-shrink: 0; flex-wrap: wrap; justify-content: center;
+  }
+  button, select {
+    background: #2a2f36; color: #e8e6e1; border: 1px solid #3d434c;
+    border-radius: 10px; padding: 10px 16px; font-size: 15px;
+    -webkit-tap-highlight-color: transparent;
+  }
+  button:active { background: #3d434c; }
+  #sizes { display: flex; gap: 6px; }
+  #sizes button.active { background: #4a7c59; border-color: #5c9c6f; }
+  #difficulty { display: flex; gap: 6px; }
+  #difficulty button.active { background: #3f6b9c; border-color: #5c93c9; }
+</style>
+</head>
+<body>
+<div id="app">
+  <header>
+    <h1>KataGo</h1>
+    <div id="status">Loading…</div>
+  </header>
+  <div id="evalbar-wrap">
+    <div id="evalbar"><div id="evalbar-black"></div><div id="evalbar-white"></div></div>
+    <div id="evallabel"><span id="evallabel-left">Black —</span><span id="evallabel-right">White —</span></div>
+    <div id="pointloss"></div>
+  </div>
+  <div id="board-wrap">
+    <canvas id="board"></canvas>
+  </div>
+  <div id="controls">
+    <div id="sizes">
+      <button data-size="9">9×9</button>
+      <button data-size="13">13×13</button>
+      <button data-size="19">19×19</button>
+    </div>
+    <div id="difficulty">
+      <button data-level="beginner">Beginner</button>
+      <button data-level="easy">Easy</button>
+      <button data-level="normal">Normal</button>
+      <button data-level="strong">Strong</button>
+    </div>
+    <button id="hintBtn">Hint</button>
+    <button id="passBtn">Pass</button>
+    <button id="undoBtn">Undo</button>
+    <button id="scoreBtn">Score</button>
+    <button id="newBtn">New Game</button>
+  </div>
+</div>
+<script>
+const canvas = document.getElementById('board');
+const ctx = canvas.getContext('2d');
+const statusEl = document.getElementById('status');
+let size = 9;
+let stones = [];
+let cell = 0, margin = 0;
+let busy = false;
+
+function resize() {
+  const wrap = document.getElementById('board-wrap');
+  const s = Math.min(wrap.clientWidth, wrap.clientHeight) - 8;
+  const dpr = window.devicePixelRatio || 1;
+  canvas.style.width = s + 'px';
+  canvas.style.height = s + 'px';
+  canvas.width = s * dpr;
+  canvas.height = s * dpr;
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  margin = s * 0.06;
+  cell = (s - margin * 2) / (size - 1);
+  draw();
+}
+
+function draw() {
+  const s = parseFloat(canvas.style.width);
+  ctx.fillStyle = '#dcb35c';
+  ctx.fillRect(0, 0, s, s);
+  ctx.strokeStyle = '#3a2c14';
+  ctx.lineWidth = 1;
+  for (let i = 0; i < size; i++) {
+    const p = margin + i * cell;
+    ctx.beginPath();
+    ctx.moveTo(margin, p); ctx.lineTo(s - margin, p); ctx.stroke();
+    ctx.beginPath();
+    ctx.moveTo(p, margin); ctx.lineTo(p, s - margin); ctx.stroke();
+  }
+  // star points
+  const stars = starPoints(size);
+  ctx.fillStyle = '#3a2c14';
+  for (const [x, y] of stars) {
+    const px = margin + x * cell, py = margin + y * cell;
+    ctx.beginPath(); ctx.arc(px, py, Math.max(2, cell * 0.08), 0, 7); ctx.fill();
+  }
+  // stones
+  for (const st of stones) {
+    const px = margin + st.x * cell, py = margin + st.y * cell;
+    ctx.beginPath();
+    ctx.arc(px, py, cell * 0.46, 0, 7);
+    const grad = ctx.createRadialGradient(px - cell * 0.15, py - cell * 0.15, cell * 0.05, px, py, cell * 0.46);
+    if (st.color === 'B') {
+      grad.addColorStop(0, '#5a5a5a'); grad.addColorStop(1, '#0a0a0a');
+    } else {
+      grad.addColorStop(0, '#ffffff'); grad.addColorStop(1, '#c8c8c8');
+    }
+    ctx.fillStyle = grad;
+    ctx.fill();
+    ctx.strokeStyle = 'rgba(0,0,0,0.3)'; ctx.lineWidth = 1; ctx.stroke();
+  }
+  if (lastAiMove) {
+    const px = margin + lastAiMove.x * cell, py = margin + lastAiMove.y * cell;
+    ctx.beginPath();
+    ctx.arc(px, py, cell * 0.15, 0, 7);
+    ctx.fillStyle = '#e0393e';
+    ctx.fill();
+  }
+  // hint markers
+  const hintColors = ['#3fa9f5', '#7bc6f9', '#b8e0fc'];
+  hints.forEach((h, i) => {
+    const px = margin + h.x * cell, py = margin + h.y * cell;
+    ctx.beginPath();
+    ctx.arc(px, py, cell * 0.4, 0, 7);
+    ctx.fillStyle = hintColors[i] || '#b8e0fc';
+    ctx.globalAlpha = 0.85;
+    ctx.fill();
+    ctx.globalAlpha = 1;
+    ctx.fillStyle = '#0a2a3a';
+    ctx.font = `bold ${Math.round(cell * 0.42)}px sans-serif`;
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillText(String(h.rank), px, py + cell * 0.02);
+  });
+}
+
+function starPoints(n) {
+  if (n === 9) return [[2,2],[6,2],[4,4],[2,6],[6,6]];
+  if (n === 13) return [[3,3],[9,3],[6,6],[3,9],[9,9]];
+  if (n === 19) return [[3,3],[9,3],[15,3],[3,9],[9,9],[15,9],[3,15],[9,15],[15,15]];
+  return [];
+}
+
+let lastAiMove = null;
+let hints = [];
+
+canvas.addEventListener('pointerdown', (e) => {
+  if (busy) return;
+  if (hints.length) { hints = []; draw(); }
+  const rect = canvas.getBoundingClientRect();
+  const px = e.clientX - rect.left, py = e.clientY - rect.top;
+  const x = Math.round((px - margin) / cell);
+  const y = Math.round((py - margin) / cell);
+  if (x < 0 || x >= size || y < 0 || y >= size) return;
+  if (stones.some(s => s.x === x && s.y === y)) return;
+  playMove(x, y);
+});
+
+async function api(path, opts) {
+  const res = await fetch(path, opts);
+  return res.json();
+}
+
+function updateEval(winrate, scoreLead) {
+  if (winrate === undefined || winrate === null) return;
+  const blackPct = Math.round(winrate * 100);
+  document.getElementById('evalbar-black').style.width = blackPct + '%';
+  document.getElementById('evalbar-white').style.width = (100 - blackPct) + '%';
+  document.getElementById('evallabel-left').textContent = `Black ${blackPct}%`;
+  const lead = scoreLead >= 0 ? `Black +${scoreLead.toFixed(1)}` : `White +${(-scoreLead).toFixed(1)}`;
+  document.getElementById('evallabel-right').textContent = lead;
+}
+
+function showPointLoss(loss) {
+  const el = document.getElementById('pointloss');
+  if (loss === undefined || loss === null) { el.textContent = ''; el.className = ''; return; }
+  if (loss < 1.5) { el.textContent = 'Good move'; el.className = 'good'; }
+  else if (loss < 4) { el.textContent = `−${loss.toFixed(1)} pts`; el.className = 'minor'; }
+  else { el.textContent = `−${loss.toFixed(1)} pts (mistake)`; el.className = 'bad'; }
+}
+
+async function playMove(x, y) {
+  busy = true;
+  statusEl.textContent = 'Thinking…';
+  stones.push({x, y, color: 'B'});
+  draw();
+  try {
+    const data = await api('/api/move', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({x, y})
+    });
+    if (!data.ok) { statusEl.textContent = 'Illegal move'; await refreshBoard(); return; }
+    showPointLoss(data.point_loss);
+    updateEval(data.winrate, data.score_lead);
+    handleAiMove(data.ai_move);
+    stones = data.stones;
+    draw();
+  } finally {
+    busy = false;
+  }
+}
+
+function handleAiMove(aiMove) {
+  lastAiMove = null;
+  hints = [];
+  if (!aiMove) { statusEl.textContent = 'Your move'; return; }
+  if (aiMove.special === 'pass') { statusEl.textContent = 'KataGo passed. Pass again to end, or play on.'; return; }
+  if (aiMove.special === 'resign') { statusEl.textContent = 'KataGo resigned! You win.'; return; }
+  lastAiMove = aiMove;
+  statusEl.textContent = 'Your move';
+}
+
+async function refreshBoard() {
+  // no-op placeholder if a full re-fetch is ever needed
+}
+
+document.getElementById('passBtn').onclick = async () => {
+  if (busy) return;
+  busy = true;
+  statusEl.textContent = 'Thinking…';
+  try {
+    const data = await api('/api/pass', {method: 'POST'});
+    showPointLoss(data.point_loss);
+    updateEval(data.winrate, data.score_lead);
+    handleAiMove(data.ai_move);
+    stones = data.stones;
+    draw();
+  } finally { busy = false; }
+};
+
+document.getElementById('undoBtn').onclick = async () => {
+  if (busy) return;
+  const data = await api('/api/undo', {method: 'POST'});
+  stones = data.stones;
+  lastAiMove = null;
+  hints = [];
+  showPointLoss(null);
+  updateEval(data.winrate, data.score_lead);
+  statusEl.textContent = 'Your move';
+  draw();
+};
+
+document.getElementById('scoreBtn').onclick = async () => {
+  const data = await api('/api/score');
+  statusEl.textContent = 'Estimated result: ' + data.result;
+};
+
+async function newGame(sz) {
+  size = sz;
+  document.querySelectorAll('#sizes button').forEach(b => {
+    b.classList.toggle('active', parseInt(b.dataset.size) === sz);
+  });
+  const data = await api('/api/new', {
+    method: 'POST', headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({size: sz})
+  });
+  stones = data.stones;
+  lastAiMove = null;
+  hints = [];
+  showPointLoss(null);
+  updateEval(data.winrate, data.score_lead);
+  statusEl.textContent = 'Your move (Black)';
+  resize();
+}
+
+document.getElementById('hintBtn').onclick = async () => {
+  if (busy) return;
+  busy = true;
+  const prevStatus = statusEl.textContent;
+  statusEl.textContent = 'Thinking of hints…';
+  try {
+    const data = await api('/api/suggest');
+    hints = data.moves || [];
+    statusEl.textContent = hints.length ? prevStatus : 'No hints available';
+    draw();
+  } finally { busy = false; }
+};
+
+document.querySelectorAll('#sizes button').forEach(b => {
+  b.onclick = () => newGame(parseInt(b.dataset.size));
+});
+document.getElementById('newBtn').onclick = () => newGame(size);
+
+function markActiveDifficulty(level) {
+  document.querySelectorAll('#difficulty button').forEach(b => {
+    b.classList.toggle('active', b.dataset.level === level);
+  });
+}
+
+document.querySelectorAll('#difficulty button').forEach(b => {
+  b.onclick = async () => {
+    if (busy) return;
+    const data = await api('/api/difficulty', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({level: b.dataset.level})
+    });
+    if (data.ok) {
+      markActiveDifficulty(data.level);
+      statusEl.textContent = `Difficulty: ${b.textContent}`;
+    }
+  };
+});
+
+async function loadDifficulty() {
+  const data = await api('/api/difficulty');
+  markActiveDifficulty(data.level);
+}
+
+window.addEventListener('resize', resize);
+newGame(9);
+loadDifficulty();
+</script>
+</body>
+</html>

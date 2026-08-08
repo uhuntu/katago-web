@@ -1,0 +1,15 @@
+#!/bin/bash
+# Wrapper for KataGo with default model/config; pass a subcommand (gtp, benchmark, analysis, ...)
+# followed by any extra args, which are appended last so they can override the defaults.
+KATAGO_BIN="$HOME/katago/src/cpp/build/katago"
+MODEL="$HOME/katago/models/kata1-b28c512nbt-s13255194368-d5935380940.bin.gz"
+CONFIG="$HOME/katago/gtp.cfg"
+
+if [ "$#" -eq 0 ]; then
+  echo "Usage: katago <command> [extra args]  (e.g. katago gtp, katago benchmark)"
+  exit 1
+fi
+
+CMD="$1"
+shift
+exec "$KATAGO_BIN" "$CMD" -model "$MODEL" -config "$CONFIG" "$@"

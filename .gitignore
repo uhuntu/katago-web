@@ -1,0 +1,17 @@
+# Third-party KataGo source clone (not our code; see README for setup)
+src/
+
+# Neural net weights (large binary; see README for download link)
+models/
+
+# Python virtualenvs (regenerate via requirements.txt)
+webui-venv/
+katrain-venv/
+
+# Runtime logs
+*.log
+webui/gtp_logs/
+
+# Python cache
+__pycache__/
+*.pyc

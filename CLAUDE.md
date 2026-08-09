@@ -1,10 +1,16 @@
 # KataGo Web Board — Project Context
 
-This project was built interactively over a long session. Full transcript
-(if deeper history is ever needed) is at:
-`notes/2026-08-09-201515-i-want-to-install-katago.txt`
-(gitignored — contains a secret, see Credentials below; don't commit it or
-paste its contents into anything that gets pushed.)
+**Before doing anything else in this directory, read the full file
+`notes/2026-08-09-201515-i-want-to-install-katago.txt` in this repo.** It is
+the verbatim transcript of the session that built this entire project —
+every decision, every bug hit and fixed, every "why" behind the choices
+below. This CLAUDE.md is only a summary; the transcript is the real context.
+Reading it is the closest equivalent to resuming that prior conversation,
+since Desktop app and CLI sessions don't share history and there's no
+product feature to actually import one into the other.
+
+(That file is gitignored — it contains a secret, see Credentials below.
+Don't commit it or paste its contents into anything that gets pushed.)
 
 ## What this is
 

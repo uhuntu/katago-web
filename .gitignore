@@ -15,3 +15,9 @@ webui/gtp_logs/
 # Python cache
 __pycache__/
 *.pyc
+
+# Web board HTTP basic auth credentials
+.auth
+
+# Conversation transcripts / notes (may contain secrets discussed in chat)
+notes/

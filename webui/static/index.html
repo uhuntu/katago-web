@@ -57,6 +57,9 @@
   #sizes button.active { background: #4a7c59; border-color: #5c9c6f; }
   #difficulty { display: flex; gap: 6px; }
   #difficulty button.active { background: #3f6b9c; border-color: #5c93c9; }
+  #colorChoice { display: flex; gap: 6px; }
+  #colorChoice button.active { background: #8a6d3b; border-color: #c9975c; }
+  #autoHintBtn.active { background: #3fa9f5; border-color: #7bc6f9; color: #0a2a3a; }
 </style>
 </head>
 <body>
@@ -85,7 +88,12 @@
       <button data-level="normal">Normal</button>
       <button data-level="strong">Strong</button>
     </div>
+    <div id="colorChoice">
+      <button data-color="b">Play Black</button>
+      <button data-color="w">Play White</button>
+    </div>
     <button id="hintBtn">Hint</button>
+    <button id="autoHintBtn">Auto Hint: Off</button>
     <button id="passBtn">Pass</button>
     <button id="undoBtn">Undo</button>
     <button id="scoreBtn">Score</button>
@@ -96,7 +104,8 @@
 const canvas = document.getElementById('board');
 const ctx = canvas.getContext('2d');
 const statusEl = document.getElementById('status');
-let size = 9;
+let size = 13;
+let myColor = 'b';
 let stones = [];
 let cell = 0, margin = 0;
 let busy = false;
@@ -223,7 +232,7 @@ function showPointLoss(loss) {
 async function playMove(x, y) {
   busy = true;
   statusEl.textContent = 'Thinking…';
-  stones.push({x, y, color: 'B'});
+  stones.push({x, y, color: myColor === 'b' ? 'B' : 'W'});
   draw();
   try {
     const data = await api('/api/move', {
@@ -236,19 +245,24 @@ async function playMove(x, y) {
     handleAiMove(data.ai_move);
     stones = data.stones;
     draw();
+    if (autoHint) await fetchHints();
   } finally {
     busy = false;
   }
 }
 
+function yourMoveText() {
+  return `Your move (${myColor === 'b' ? 'Black' : 'White'})`;
+}
+
 function handleAiMove(aiMove) {
   lastAiMove = null;
   hints = [];
-  if (!aiMove) { statusEl.textContent = 'Your move'; return; }
+  if (!aiMove) { statusEl.textContent = yourMoveText(); return; }
   if (aiMove.special === 'pass') { statusEl.textContent = 'KataGo passed. Pass again to end, or play on.'; return; }
   if (aiMove.special === 'resign') { statusEl.textContent = 'KataGo resigned! You win.'; return; }
   lastAiMove = aiMove;
-  statusEl.textContent = 'Your move';
+  statusEl.textContent = yourMoveText();
 }
 
 async function refreshBoard() {
@@ -266,19 +280,24 @@ document.getElementById('passBtn').onclick = async () => {
     handleAiMove(data.ai_move);
     stones = data.stones;
     draw();
+    if (autoHint) await fetchHints();
   } finally { busy = false; }
 };
 
 document.getElementById('undoBtn').onclick = async () => {
   if (busy) return;
-  const data = await api('/api/undo', {method: 'POST'});
-  stones = data.stones;
-  lastAiMove = null;
-  hints = [];
-  showPointLoss(null);
-  updateEval(data.winrate, data.score_lead);
-  statusEl.textContent = 'Your move';
-  draw();
+  busy = true;
+  try {
+    const data = await api('/api/undo', {method: 'POST'});
+    stones = data.stones;
+    lastAiMove = null;
+    hints = [];
+    showPointLoss(null);
+    updateEval(data.winrate, data.score_lead);
+    statusEl.textContent = yourMoveText();
+    draw();
+    if (autoHint) await fetchHints();
+  } finally { busy = false; }
 };
 
 document.getElementById('scoreBtn').onclick = async () => {
@@ -287,35 +306,62 @@ document.getElementById('scoreBtn').onclick = async () => {
 };
 
 async function newGame(sz) {
-  size = sz;
-  document.querySelectorAll('#sizes button').forEach(b => {
-    b.classList.toggle('active', parseInt(b.dataset.size) === sz);
-  });
-  const data = await api('/api/new', {
-    method: 'POST', headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify({size: sz})
-  });
-  stones = data.stones;
-  lastAiMove = null;
-  hints = [];
-  showPointLoss(null);
-  updateEval(data.winrate, data.score_lead);
-  statusEl.textContent = 'Your move (Black)';
-  resize();
+  if (busy) return;
+  busy = true;
+  try {
+    size = sz;
+    document.querySelectorAll('#sizes button').forEach(b => {
+      b.classList.toggle('active', parseInt(b.dataset.size) === sz);
+    });
+    const data = await api('/api/new', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({size: sz, color: myColor})
+    });
+    stones = data.stones;
+    hints = [];
+    showPointLoss(null);
+    updateEval(data.winrate, data.score_lead);
+    handleAiMove(data.ai_move);
+    resize();
+    if (autoHint) await fetchHints();
+  } finally { busy = false; }
+}
+
+async function fetchHints() {
+  const prevStatus = statusEl.textContent;
+  statusEl.textContent = 'Thinking of hints…';
+  const data = await api('/api/suggest');
+  hints = data.moves || [];
+  statusEl.textContent = hints.length ? prevStatus : 'No hints available';
+  draw();
 }
 
 document.getElementById('hintBtn').onclick = async () => {
   if (busy) return;
   busy = true;
-  const prevStatus = statusEl.textContent;
-  statusEl.textContent = 'Thinking of hints…';
   try {
-    const data = await api('/api/suggest');
-    hints = data.moves || [];
-    statusEl.textContent = hints.length ? prevStatus : 'No hints available';
-    draw();
+    await fetchHints();
   } finally { busy = false; }
 };
+
+let autoHint = localStorage.getItem('autoHint') === '1';
+
+function updateAutoHintBtn() {
+  const b = document.getElementById('autoHintBtn');
+  b.textContent = 'Auto Hint: ' + (autoHint ? 'On' : 'Off');
+  b.classList.toggle('active', autoHint);
+}
+
+document.getElementById('autoHintBtn').onclick = async () => {
+  autoHint = !autoHint;
+  localStorage.setItem('autoHint', autoHint ? '1' : '0');
+  updateAutoHintBtn();
+  if (autoHint && !busy) {
+    busy = true;
+    try { await fetchHints(); } finally { busy = false; }
+  }
+};
+updateAutoHintBtn();
 
 document.querySelectorAll('#sizes button').forEach(b => {
   b.onclick = () => newGame(parseInt(b.dataset.size));
@@ -347,8 +393,27 @@ async function loadDifficulty() {
   markActiveDifficulty(data.level);
 }
 
+function markActiveColor(color) {
+  document.querySelectorAll('#colorChoice button').forEach(b => {
+    b.classList.toggle('active', b.dataset.color === color);
+  });
+}
+
+document.querySelectorAll('#colorChoice button').forEach(b => {
+  b.onclick = async () => {
+    if (busy) return;
+    myColor = b.dataset.color;
+    localStorage.setItem('myColor', myColor);
+    markActiveColor(myColor);
+    await newGame(size);
+  };
+});
+
+myColor = localStorage.getItem('myColor') || 'b';
+markActiveColor(myColor);
+
 window.addEventListener('resize', resize);
-newGame(9);
+newGame(13);
 loadDifficulty();
 </script>
 </body>

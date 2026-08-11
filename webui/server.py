@@ -1,10 +1,22 @@
+import hmac
 import os
 import re
 import subprocess
 import threading
 import time
 
-from flask import Flask, jsonify, request, send_from_directory
+from flask import Flask, Response, jsonify, request, send_from_directory
+
+AUTH_FILE = os.path.expanduser("~/katago/.auth")
+
+
+def load_auth():
+    with open(AUTH_FILE) as f:
+        user, _, pw = f.read().strip().partition(":")
+    return user, pw
+
+
+AUTH_USER, AUTH_PASS = load_auth()
 
 KATAGO_BIN = os.path.expanduser("~/katago/src/cpp/build/katago")
 MODEL = os.path.expanduser(
@@ -29,6 +41,7 @@ class Engine:
         self.size = 9
         self.proc = None
         self.difficulty = DEFAULT_DIFFICULTY
+        self.human_color = "b"
         self.last_black_eval = {"winrate": 0.5, "scoreLead": 0.0}
         self._start_process()
         self._reset(self.size)
@@ -73,10 +86,17 @@ class Engine:
         self._raw_send("clear_board")
         self.size = size
 
-    def new_game(self, size):
+    def new_game(self, size, human_color="b"):
+        self.human_color = human_color
         with self.lock:
             self._reset(size)
-        self.last_black_eval = self.black_eval()
+        opponent_color = "w" if human_color == "b" else "b"
+        ai_move = None
+        if human_color == "w":
+            # Human plays White; Black (AI) must open.
+            ai_move = self.genmove_color(opponent_color)
+        self.last_black_eval = self.eval_as_black_frame(human_color)
+        return ai_move
 
     def coord_to_gtp(self, x, y):
         col = COLS[x]
@@ -120,8 +140,8 @@ class Engine:
                         stones.append({"x": x, "y": y, "color": "B" if ch == "X" else "W"})
         return stones
 
-    def genmove_white(self):
-        resp = self.cmd("genmove w")
+    def genmove_color(self, color):
+        resp = self.cmd(f"genmove {color}")
         text = resp[0][1:].strip() if resp and resp[0].startswith("=") else ""
         return self.gtp_to_coord(text) if text else None
 
@@ -212,9 +232,36 @@ class Engine:
             return {"winrate": 0.5, "scoreLead": 0.0}
         return result
 
+    def eval_as_black_frame(self, color_to_move):
+        """Analyzes as whichever color actually has the move right now (required
+        by kata-analyze), then converts the result into Black's frame of
+        reference so all cached/internal state stays in one consistent frame
+        regardless of which color the human is playing."""
+        result = self.analyze(color_to_move)
+        if result is None:
+            return {"winrate": 0.5, "scoreLead": 0.0}
+        if color_to_move == "b":
+            return result
+        return {"winrate": 1 - result["winrate"], "scoreLead": -result["scoreLead"]}
+
 
 engine = Engine()
 app = Flask(__name__, static_folder="static")
+
+
+@app.before_request
+def require_auth():
+    auth = request.authorization
+    valid = (
+        auth is not None
+        and hmac.compare_digest(auth.username or "", AUTH_USER)
+        and hmac.compare_digest(auth.password or "", AUTH_PASS)
+    )
+    if not valid:
+        return Response(
+            "Authentication required", 401,
+            {"WWW-Authenticate": 'Basic realm="KataGo"'},
+        )
 
 
 @app.route("/api/difficulty", methods=["GET", "POST"])
@@ -234,7 +281,7 @@ def index():
 
 @app.route("/api/suggest", methods=["GET"])
 def api_suggest():
-    cands = engine.candidates("b")
+    cands = engine.candidates(engine.human_color)
     moves = [
         {"x": c["coord"]["x"], "y": c["coord"]["y"], "winrate": c["winrate"],
          "score_lead": c["scoreLead"], "rank": c["order"] + 1}
@@ -246,7 +293,13 @@ def api_suggest():
     # just because a separate, independently-noisy search ran afterwards.
     if cands:
         top = cands[0]
-        engine.last_black_eval = {"winrate": top["winrate"], "scoreLead": top["scoreLead"]}
+        top_eval = {"winrate": top["winrate"], "scoreLead": top["scoreLead"]}
+        if engine.human_color == "b":
+            engine.last_black_eval = top_eval
+        else:
+            engine.last_black_eval = {
+                "winrate": 1 - top_eval["winrate"], "scoreLead": -top_eval["scoreLead"],
+            }
     return jsonify({"ok": True, "moves": moves})
 
 
@@ -254,28 +307,36 @@ def api_suggest():
 def api_new():
     data = request.get_json(force=True) or {}
     size = int(data.get("size", 9))
-    engine.new_game(size)
+    color = data.get("color", "b")
+    if color not in ("b", "w"):
+        color = "b"
+    ai_move = engine.new_game(size, color)
     ev = engine.last_black_eval
     return jsonify({
-        "ok": True, "size": size, "stones": engine.board(),
-        "winrate": ev["winrate"], "score_lead": ev["scoreLead"],
+        "ok": True, "size": size, "color": color, "stones": engine.board(),
+        "ai_move": ai_move, "winrate": ev["winrate"], "score_lead": ev["scoreLead"],
     })
 
 
-def _after_black_move():
-    """Call after a black move has been played (before white replies).
+def _after_human_move():
+    """Call after the human's move has been played (before the AI replies).
     Returns point loss for that move using the cached pre-move eval."""
     before = engine.last_black_eval
-    white_view = engine.analyze("w")
-    if white_view is None:
+    opponent_color = "w" if engine.human_color == "b" else "b"
+    opp_view = engine.analyze(opponent_color)
+    if opp_view is None:
         return None
-    after_black_score = -white_view["scoreLead"]
-    return round(max(0.0, before["scoreLead"] - after_black_score), 1)
+    after_black_score = opp_view["scoreLead"] if opponent_color == "b" else -opp_view["scoreLead"]
+    if engine.human_color == "b":
+        loss = before["scoreLead"] - after_black_score
+    else:
+        loss = after_black_score - before["scoreLead"]
+    return round(max(0.0, loss), 1)
 
 
-def _after_white_move():
-    """Call after white has replied; refreshes the cached black-perspective eval."""
-    engine.last_black_eval = engine.black_eval()
+def _after_ai_move():
+    """Call after the AI has replied; refreshes the cached black-frame eval."""
+    engine.last_black_eval = engine.eval_as_black_frame(engine.human_color)
     return engine.last_black_eval
 
 
@@ -284,12 +345,13 @@ def api_move():
     data = request.get_json(force=True)
     x, y = int(data["x"]), int(data["y"])
     gtp_coord = engine.coord_to_gtp(x, y)
-    resp = engine.cmd(f"play b {gtp_coord}")
+    resp = engine.cmd(f"play {engine.human_color} {gtp_coord}")
     if resp and resp[0].startswith("?"):
         return jsonify({"ok": False, "error": resp[0]}), 400
-    point_loss = _after_black_move()
-    ai_move = engine.genmove_white()
-    eval_now = _after_white_move()
+    point_loss = _after_human_move()
+    opponent_color = "w" if engine.human_color == "b" else "b"
+    ai_move = engine.genmove_color(opponent_color)
+    eval_now = _after_ai_move()
     return jsonify({
         "ok": True, "ai_move": ai_move, "stones": engine.board(),
         "point_loss": point_loss, "winrate": eval_now["winrate"],
@@ -299,10 +361,11 @@ def api_move():
 
 @app.route("/api/pass", methods=["POST"])
 def api_pass():
-    engine.cmd("play b pass")
-    point_loss = _after_black_move()
-    ai_move = engine.genmove_white()
-    eval_now = _after_white_move()
+    engine.cmd(f"play {engine.human_color} pass")
+    point_loss = _after_human_move()
+    opponent_color = "w" if engine.human_color == "b" else "b"
+    ai_move = engine.genmove_color(opponent_color)
+    eval_now = _after_ai_move()
     return jsonify({
         "ok": True, "ai_move": ai_move, "stones": engine.board(),
         "point_loss": point_loss, "winrate": eval_now["winrate"],
@@ -314,7 +377,7 @@ def api_pass():
 def api_undo():
     engine.cmd("undo")
     engine.cmd("undo")
-    eval_now = engine.black_eval()
+    eval_now = engine.eval_as_black_frame(engine.human_color)
     engine.last_black_eval = eval_now
     return jsonify({
         "ok": True, "stones": engine.board(),

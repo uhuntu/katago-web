@@ -50,6 +50,24 @@ a fixed port): `pgrep -af server.py`. Kill with `pkill -f "webui/server.py"`.
 - Tailscale (works from any network, no VPN app needed on the client since
   Funnel makes it a real public HTTPS URL): `https://hunt-optiplex-7071.tail187bfc.ts.net/`
   Toggle off with `tailscale funnel --https=443 off`.
+- SSH reverse tunnel via 10.11.108.241 (reachable from any device on that
+  VPN, plain HTTP — no TLS): `http://10.11.108.241:8765/`. Independent of
+  Tailscale, so it's a fallback if Funnel/its DNS misbehaves. Backed by the
+  `reverse-241.service` systemd user unit (`ssh -NT 10.11.108.241`,
+  `Restart=always`), which reads the `RemoteForward 0.0.0.0:8765
+  localhost:8765` line in `~/.ssh/config`'s `Host 10.11.108.241` block. The
+  explicit `0.0.0.0:` bind is required — that host's sshd has `GatewayPorts
+  clientspecified`, so an unqualified `RemoteForward 8765 ...` would silently
+  bind loopback-only and not be reachable from other devices. The existing
+  `7897`/`3390` forwards on that same host intentionally stay loopback (no
+  bind address given), so don't add one there either.
+  Same trick would work via 10.200.7.149, but that host's sshd doesn't have
+  `GatewayPorts` set (defaults to `no`) — needs `GatewayPorts clientspecified`
+  added to `/etc/ssh/sshd_config` there (needs root) before a forward on it
+  would be externally reachable.
+  To open a second, non-conflicting SSH session to either host without
+  colliding with the systemd-managed tunnel's own forwards, use the `241n`/
+  `149n` aliases in `~/.ssh/config` (`ClearAllForwardings yes`).
 
 ## Credentials
 

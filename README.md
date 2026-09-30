@@ -17,6 +17,7 @@ Built for a local machine with an NVIDIA GPU (tested on RTX 2080, OpenCL backend
 ├── webui/
 │   ├── server.py         # Flask app wrapping a KataGo GTP subprocess
 │   └── static/index.html # Touch-friendly board UI (canvas-based)
+├── tests/test_server.py # Unit tests for parsing/coord helpers (no GPU needed)
 ├── src/                  # KataGo source clone (gitignored — see Setup)
 ├── models/                # Neural net weights (gitignored — see Setup)
 ├── webui-venv/            # Python venv for webui/ (gitignored)
@@ -80,13 +81,27 @@ from your phone's browser.
   point-loss, hints) is always computed at a fixed 300 visits regardless of
   difficulty, so feedback stays meaningful even when the AI is playing weak.
 
+## Tests
+
+Pure helper functions (coordinate conversion, `showboard` parsing) are covered
+by unit tests that need neither the GPU nor the KataGo binary:
+
+```bash
+webui-venv/bin/python -m unittest discover -s tests -v
+```
+
 ## Known limitations
 
-- Analysis runs on a short ~0.6–0.8s search per query to stay responsive on a
+- Analysis runs on a short ~1.3s search per query to stay responsive on a
   phone — it's a good general read, not as precise as a deep desktop review.
-- Flask's built-in dev server is used — fine on a home LAN/Tailscale, not
-  hardened for the open internet.
-- No authentication. Don't port-forward this to the public internet as-is.
+- Flask's built-in dev server, protected by HTTP Basic Auth (credentials in
+  `~/katago/.auth`, gitignored). Fine behind Tailscale Funnel (TLS) or a home
+  LAN; don't port-forward it to the public internet — the plain-HTTP fallback
+  tunnel (see AGENTS.md) sends Basic Auth credentials in the clear, and Basic
+  Auth alone isn't hardened.
+- One shared board, one game at a time, no accounts. Game state lives in the
+  KataGo process, so a refresh keeps the game (server-side state), but an engine
+  crash restarts KataGo (watchdog) and the game in progress.
 
 ## Desktop companion: KaTrain
 

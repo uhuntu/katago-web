@@ -10,7 +10,7 @@ katrain-venv/
 
 # Runtime logs
 *.log
-webui/gtp_logs/
+gtp_logs/
 
 # Python cache
 __pycache__/
@@ -21,3 +21,6 @@ __pycache__/
 
 # Conversation transcripts / notes (may contain secrets discussed in chat)
 notes/
+
+# Local agent/session state (plans, caches)
+.stepcode/

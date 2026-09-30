@@ -388,11 +388,6 @@ document.querySelectorAll('#difficulty button').forEach(b => {
   };
 });
 
-async function loadDifficulty() {
-  const data = await api('/api/difficulty');
-  markActiveDifficulty(data.level);
-}
-
 function markActiveColor(color) {
   document.querySelectorAll('#colorChoice button').forEach(b => {
     b.classList.toggle('active', b.dataset.color === color);
@@ -413,8 +408,33 @@ myColor = localStorage.getItem('myColor') || 'b';
 markActiveColor(myColor);
 
 window.addEventListener('resize', resize);
-newGame(13);
-loadDifficulty();
+
+// On load: restore whatever game the server already has (size, color,
+// difficulty, stones, eval) so a phone refresh never wipes a game in progress.
+// "New Game" and the size/color selectors are the only things that reset.
+async function init() {
+  try {
+    const data = await api('/api/state');
+    if (!data.ok) throw new Error('no state');
+    size = data.size || size;
+    myColor = data.color || myColor;
+    localStorage.setItem('myColor', myColor);
+    stones = data.stones || [];
+    document.querySelectorAll('#sizes button').forEach(b => {
+      b.classList.toggle('active', parseInt(b.dataset.size) === size);
+    });
+    markActiveColor(myColor);
+    if (data.difficulty) markActiveDifficulty(data.difficulty);
+    showPointLoss(null);
+    updateEval(data.winrate, data.score_lead);
+    resize();
+    statusEl.textContent = yourMoveText();
+  } catch (e) {
+    statusEl.textContent = 'Could not restore game — starting a new one';
+    await newGame(size);
+  }
+}
+init();
 </script>
 </body>
 </html>

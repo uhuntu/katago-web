@@ -23,6 +23,7 @@ MODEL = os.path.expanduser(
     "~/katago/models/kata1-b28c512nbt-s13255194368-d5935380940.bin.gz"
 )
 CONFIG = os.path.expanduser("~/katago/gtp.cfg")
+ENGINE_LOG = os.path.expanduser("~/katago/gtp_logs/engine.log")
 COLS = "ABCDEFGHJKLMNOPQRSTUVWXYZ"
 
 DIFFICULTIES = {
@@ -33,13 +34,55 @@ DIFFICULTIES = {
 }
 DEFAULT_DIFFICULTY = "normal"
 ANALYSIS_VISITS = 300
+ANALYSIS_INTERVAL_CS = 10
+
+engine = None
+
+
+def get_engine():
+    """Lazily start the KataGo process on first use (also keeps the module
+    importable by the unit tests, which must not spawn a subprocess)."""
+    global engine
+    if engine is None:
+        engine = Engine()
+    return engine
+
+
+def parse_showboard(lines, size):
+    """Parse KataGo `showboard` output lines into [{"x", "y", "color"}].
+    x is the column index (left = 0, skipping the letter I, per GTP), y is the
+    row index (top = 0). Pure function so it can be unit-tested without a GPU."""
+    expected_header = " ".join(COLS[:size])
+    header_idx = None
+    for i, l in enumerate(lines):
+        if l.strip() == expected_header:
+            header_idx = i
+            break
+    stones = []
+    if header_idx is None:
+        return stones
+    hline = lines[header_idx]
+    col_positions = [hline.index(c) for c in COLS[:size]]
+    for j in range(size):
+        row_line = lines[header_idx + 1 + j]
+        rm = re.match(r"^\s*(\d+)\s", row_line)
+        if not rm:
+            continue
+        rownum = int(rm.group(1))
+        y = size - rownum
+        for x, pos in enumerate(col_positions):
+            ch = row_line[pos] if pos < len(row_line) else "."
+            if ch in ("X", "O"):
+                stones.append({"x": x, "y": y, "color": "B" if ch == "X" else "W"})
+    return stones
 
 
 class Engine:
     def __init__(self):
-        self.lock = threading.Lock()
+        self.lock = threading.RLock()
         self.size = 9
         self.proc = None
+        self.log = open(ENGINE_LOG, "a")
         self.difficulty = DEFAULT_DIFFICULTY
         self.human_color = "b"
         self.last_black_eval = {"winrate": 0.5, "scoreLead": 0.0}
@@ -47,6 +90,39 @@ class Engine:
         self._reset(self.size)
         self.set_difficulty(self.difficulty)
         self.last_black_eval = self.black_eval()
+        threading.Thread(target=self._watchdog, daemon=True).start()
+
+    def _watchdog(self):
+        """Respawn the KataGo process if it ever dies. Board state lives in the
+        engine, so a restart means the current game is lost (logged loudly);
+        this keeps the server from 500-ing on every request forever."""
+        while True:
+            time.sleep(5)
+            try:
+                self._ensure_process()
+            except Exception as e:  # the watchdog itself must never die
+                print(f"[engine watchdog] ensure_process failed: {e!r}", flush=True)
+
+    def _alive(self):
+        return self.proc is not None and self.proc.poll() is None
+
+    def _ensure_process(self):
+        """Re-entrant with self.lock (RLock): restarts KataGo if it died and
+        restores boardsize/komi and the difficulty params. The whole restart
+        sequence holds the lock, so a request arriving mid-restart waits for a
+        consistent process instead of interleaving its own reads on the pipe."""
+        if self._alive():
+            return
+        with self.lock:
+            if self._alive():  # another thread may have restarted it meanwhile
+                return
+            if self.proc is not None:
+                print(f"[engine] katago process ended (rc={self.proc.poll()}); "
+                      "restarting — board contents reset", flush=True)
+            self._start_process()
+            self._reset(self.size)
+            self.set_difficulty(self.difficulty)
+            self.last_black_eval = self.eval_as_black_frame(self.human_color)
 
     def set_difficulty(self, level):
         params = DIFFICULTIES.get(level)
@@ -65,7 +141,7 @@ class Engine:
             [KATAGO_BIN, "gtp", "-model", MODEL, "-config", CONFIG],
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
-            stderr=subprocess.DEVNULL,
+            stderr=self.log,
             text=True,
             bufsize=1,
         )
@@ -77,7 +153,14 @@ class Engine:
 
     def cmd(self, command):
         with self.lock:
-            return self._raw_send(command)
+            self._ensure_process()
+            try:
+                return self._raw_send(command)
+            except (RuntimeError, OSError, ValueError):
+                # Engine died mid-request (dead stdout / broken pipe). Restart
+                # and retry the exact command once so a crash doesn't 500 the UI.
+                self._ensure_process()
+                return self._raw_send(command)
 
     def _reset(self, size):
         komi = {9: 5.5, 13: 6.5}.get(size, 7.5)
@@ -89,6 +172,7 @@ class Engine:
     def new_game(self, size, human_color="b"):
         self.human_color = human_color
         with self.lock:
+            self._ensure_process()
             self._reset(size)
         opponent_color = "w" if human_color == "b" else "b"
         ai_move = None
@@ -116,36 +200,16 @@ class Engine:
 
     def board(self):
         with self.lock:
+            self._ensure_process()
             lines = self._raw_send("showboard")
-        expected_header = " ".join(COLS[: self.size])
-        header_idx = None
-        for i, l in enumerate(lines):
-            if l.strip() == expected_header:
-                header_idx = i
-                break
-        stones = []
-        if header_idx is not None:
-            hline = lines[header_idx]
-            col_positions = [hline.index(c) for c in COLS[: self.size]]
-            for j in range(self.size):
-                row_line = lines[header_idx + 1 + j]
-                rm = re.match(r"^\s*(\d+)\s", row_line)
-                if not rm:
-                    continue
-                rownum = int(rm.group(1))
-                y = self.size - rownum
-                for x, pos in enumerate(col_positions):
-                    ch = row_line[pos] if pos < len(row_line) else "."
-                    if ch in ("X", "O"):
-                        stones.append({"x": x, "y": y, "color": "B" if ch == "X" else "W"})
-        return stones
+        return parse_showboard(lines, self.size)
 
     def genmove_color(self, color):
         resp = self.cmd(f"genmove {color}")
         text = resp[0][1:].strip() if resp and resp[0].startswith("=") else ""
         return self.gtp_to_coord(text) if text else None
 
-    def analyze(self, color, duration=0.8, interval_cs=15):
+    def analyze(self, color, duration=0.8, interval_cs=ANALYSIS_INTERVAL_CS):
         """Runs kata-analyze briefly and returns the top move's winrate/scoreLead
         from the given color's perspective, or None if nothing came back."""
         last_report = self._analyze_last_report(color, duration, interval_cs)
@@ -162,13 +226,17 @@ class Engine:
         with self.lock:
             # Analysis quality (win rate / hints) must not be capped by the
             # difficulty setting, which only governs how well the AI *plays*.
+            self._ensure_process()
             if difficulty_visits < ANALYSIS_VISITS:
                 self.proc.stdin.write(f"kata-set-param maxVisits {ANALYSIS_VISITS}\n")
                 self.proc.stdin.flush()
                 self._read_until_blank()
             self.proc.stdin.write(f"kata-analyze {color} {interval_cs}\n")
             self.proc.stdin.flush()
-            time.sleep(duration)
+            # The sleep must cover at least one report interval, otherwise the
+            # terminating "name" can arrive before any info line does and the
+            # caller would see no analysis at all (silent 50/50 default).
+            time.sleep(max(duration, interval_cs / 100 + 0.3))
             self.proc.stdin.write("name\n")
             self.proc.stdin.flush()
             analyze_lines = self._read_until_blank()
@@ -183,7 +251,7 @@ class Engine:
                 last_report = l
         return last_report
 
-    def candidates(self, color, top_n=3, duration=0.8, interval_cs=15):
+    def candidates(self, color, top_n=3, duration=0.8, interval_cs=ANALYSIS_INTERVAL_CS):
         """Top-N candidate moves (by order) with winrate/scoreLead, for the given color."""
         last_report = self._analyze_last_report(color, duration, interval_cs)
         if not last_report:
@@ -244,8 +312,20 @@ class Engine:
             return result
         return {"winrate": 1 - result["winrate"], "scoreLead": -result["scoreLead"]}
 
+    def state(self):
+        """Snapshot for restoring the UI after a page refresh. Always represents
+        the human's turn — every move endpoint replies synchronously, so when no
+        request is in flight it is the human's move."""
+        return {
+            "size": self.size,
+            "color": self.human_color,
+            "difficulty": self.difficulty,
+            "stones": self.board(),
+            "winrate": self.last_black_eval["winrate"],
+            "score_lead": self.last_black_eval["scoreLead"],
+        }
 
-engine = Engine()
+
 app = Flask(__name__, static_folder="static")
 
 
@@ -264,14 +344,20 @@ def require_auth():
         )
 
 
+@app.before_request
+def ensure_engine_started():
+    get_engine()
+
+
 @app.route("/api/difficulty", methods=["GET", "POST"])
 def api_difficulty():
     if request.method == "POST":
         data = request.get_json(force=True) or {}
         level = data.get("level", "")
-        if not engine.set_difficulty(level):
+        if not get_engine().set_difficulty(level):
             return jsonify({"ok": False, "error": "unknown level"}), 400
-    return jsonify({"ok": True, "level": engine.difficulty, "levels": list(DIFFICULTIES.keys())})
+    return jsonify({"ok": True, "level": get_engine().difficulty,
+                    "levels": list(DIFFICULTIES.keys())})
 
 
 @app.route("/")
@@ -281,6 +367,7 @@ def index():
 
 @app.route("/api/suggest", methods=["GET"])
 def api_suggest():
+    engine = get_engine()
     cands = engine.candidates(engine.human_color)
     moves = [
         {"x": c["coord"]["x"], "y": c["coord"]["y"], "winrate": c["winrate"],
@@ -310,6 +397,7 @@ def api_new():
     color = data.get("color", "b")
     if color not in ("b", "w"):
         color = "b"
+    engine = get_engine()
     ai_move = engine.new_game(size, color)
     ev = engine.last_black_eval
     return jsonify({
@@ -318,9 +406,16 @@ def api_new():
     })
 
 
+@app.route("/api/state", methods=["GET"])
+def api_state():
+    engine = get_engine()
+    return jsonify({"ok": True, **engine.state()})
+
+
 def _after_human_move():
     """Call after the human's move has been played (before the AI replies).
     Returns point loss for that move using the cached pre-move eval."""
+    engine = get_engine()
     before = engine.last_black_eval
     opponent_color = "w" if engine.human_color == "b" else "b"
     opp_view = engine.analyze(opponent_color)
@@ -336,6 +431,7 @@ def _after_human_move():
 
 def _after_ai_move():
     """Call after the AI has replied; refreshes the cached black-frame eval."""
+    engine = get_engine()
     engine.last_black_eval = engine.eval_as_black_frame(engine.human_color)
     return engine.last_black_eval
 
@@ -343,6 +439,7 @@ def _after_ai_move():
 @app.route("/api/move", methods=["POST"])
 def api_move():
     data = request.get_json(force=True)
+    engine = get_engine()
     x, y = int(data["x"]), int(data["y"])
     gtp_coord = engine.coord_to_gtp(x, y)
     resp = engine.cmd(f"play {engine.human_color} {gtp_coord}")
@@ -361,6 +458,7 @@ def api_move():
 
 @app.route("/api/pass", methods=["POST"])
 def api_pass():
+    engine = get_engine()
     engine.cmd(f"play {engine.human_color} pass")
     point_loss = _after_human_move()
     opponent_color = "w" if engine.human_color == "b" else "b"
@@ -375,6 +473,7 @@ def api_pass():
 
 @app.route("/api/undo", methods=["POST"])
 def api_undo():
+    engine = get_engine()
     engine.cmd("undo")
     engine.cmd("undo")
     eval_now = engine.eval_as_black_frame(engine.human_color)
@@ -387,10 +486,12 @@ def api_undo():
 
 @app.route("/api/score", methods=["GET"])
 def api_score():
+    engine = get_engine()
     resp = engine.cmd("final_score")
     text = resp[0][1:].strip() if resp and resp[0].startswith("=") else ""
     return jsonify({"ok": True, "result": text})
 
 
 if __name__ == "__main__":
+    get_engine()  # fail fast at startup if the binary/model/auth are missing
     app.run(host="0.0.0.0", port=8765, threaded=False)

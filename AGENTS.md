@@ -12,6 +12,11 @@ product feature to actually import one into the other.
 (That file is gitignored — it contains a secret, see Credentials below.
 Don't commit it or paste its contents into anything that gets pushed.)
 
+> `CLAUDE.md` is a symlink to this file — edit AGENTS.md only.
+>
+> Unit tests (no GPU or KataGo binary needed):
+> `cd ~/katago && webui-venv/bin/python -m unittest discover -s tests -v`
+
 ## What this is
 
 - KataGo (v1.17.2) built from source at `src/`, OpenCL backend, targeting an
@@ -99,3 +104,19 @@ Username/password live in `~/katago/.auth` (gitignored, `chmod 600`), format
   webui && python server.py`, not `python webui/server.py` — different
   strings). If port 8765 says "already in use" after a supposedly clean
   kill, check `pgrep -af server.py` for a stray PID and kill it directly.
+- **Engine watchdog.** If the KataGo process dies, a daemon thread
+  (`_watchdog` → `_ensure_process`) restarts it within ~5s and restores
+  boardsize/komi + the difficulty params; `cmd()` also retries once if a
+  request catches the death mid-flight. A restart resets the board — game
+  state is not persisted. Engine stderr is logged to
+  `~/katago/gtp_logs/engine.log` (used to go to `/dev/null`).
+- **All GTP pipe IO must happen under `Engine.lock`.** KataGo answers from a
+  single stdout pipe, so two threads reading concurrently interleave
+  responses (proven by the watchdog-vs-request race above). `_ensure_process`
+  therefore wraps its whole restart sequence in the lock, and `board()` calls
+  it under the lock too, so read paths recover from a dead engine as well.
+  The lock is an `RLock` because these helpers re-enter each other.
+- **The server takes ~10–15s before it listens on 8765.** `__main__` calls
+  `get_engine()` before `app.run()` (model load + GPU init), so an immediate
+  `curl` after launch gets connection-refused, not a response. Wait for
+  "Running on ... :8765" in the log before smoke-testing.

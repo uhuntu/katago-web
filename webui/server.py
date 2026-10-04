@@ -135,6 +135,8 @@ class Engine:
         self.log = open(ENGINE_LOG, "a")
         self.difficulty = DEFAULT_DIFFICULTY
         self.human_color = "b"
+        self.passes = 0  # consecutive passes; two end the game
+        self.resigned = False
         self.last_black_eval = {"winrate": 0.5, "scoreLead": 0.0}
         self._start_process()
         self._reset(self.size)
@@ -221,6 +223,22 @@ class Engine:
         self._raw_send(f"komi {komi}")
         self._raw_send("clear_board")
         self.size = size
+        self.passes = 0
+        self.resigned = False
+
+    def note_move(self, move_is_pass):
+        """Track consecutive passes (a human pass or an AI pass counts alike)."""
+        self.passes = self.passes + 1 if move_is_pass else 0
+
+    @property
+    def game_over(self):
+        return self.passes >= 2 or self.resigned
+
+    def final_result(self):
+        if self.resigned:
+            return "KataGo resigned. You win!"
+        resp = self.cmd("final_score")
+        return resp[0][1:].strip() if resp and resp[0].startswith("=") else ""
 
     def new_game(self, size, human_color="b"):
         self.human_color = human_color
@@ -232,6 +250,7 @@ class Engine:
         if human_color == "w":
             # Human plays White; Black (AI) must open.
             ai_move = self.genmove_color(opponent_color)
+            self.note_move(bool(ai_move and ai_move.get("special")))
         self.last_black_eval = self.eval_as_black_frame(human_color)
         return ai_move
 
@@ -248,6 +267,8 @@ class Engine:
                 return False
             if failed(self.cmd("undo")) and self.human_color == "w":
                 self.genmove_color("b")
+        self.passes = 0
+        self.resigned = False
         return True
 
     def coord_to_gtp(self, x, y):
@@ -382,6 +403,8 @@ class Engine:
             "stones": self.board(),
             "winrate": self.last_black_eval["winrate"],
             "score_lead": self.last_black_eval["scoreLead"],
+            "game_over": self.game_over,
+            "result": self.final_result() if self.game_over else None,
         }
 
 
@@ -503,11 +526,16 @@ def _finish_turn():
     point_loss = _after_human_move()
     opponent_color = "w" if engine.human_color == "b" else "b"
     ai_move = engine.genmove_color(opponent_color)
+    special = (ai_move or {}).get("special")
+    engine.note_move(special == "pass")
+    engine.resigned = special == "resign"
     eval_now = _after_ai_move()
     return {
         "ai_move": ai_move, "stones": engine.board(),
         "point_loss": point_loss, "winrate": eval_now["winrate"],
         "score_lead": eval_now["scoreLead"],
+        "game_over": engine.game_over,
+        "result": engine.final_result() if engine.game_over else None,
     }
 
 
@@ -520,6 +548,7 @@ def api_move():
     resp = engine.cmd(f"play {engine.human_color} {gtp_coord}")
     if resp and resp[0].startswith("?"):
         return jsonify({"ok": False, "error": resp[0]}), 400
+    engine.note_move(False)
     return jsonify({"ok": True, **_finish_turn()})
 
 
@@ -527,6 +556,17 @@ def api_move():
 def api_pass():
     engine = get_engine()
     engine.cmd(f"play {engine.human_color} pass")
+    engine.note_move(True)
+    if engine.game_over:
+        # The AI had already passed: both sides passed, so the game ends here
+        # and the AI doesn't get another move.
+        ev = engine.last_black_eval
+        return jsonify({
+            "ok": True, "ai_move": None, "stones": engine.board(),
+            "point_loss": None, "winrate": ev["winrate"],
+            "score_lead": ev["scoreLead"], "game_over": True,
+            "result": engine.final_result(),
+        })
     return jsonify({"ok": True, **_finish_turn()})
 
 

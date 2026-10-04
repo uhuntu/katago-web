@@ -245,6 +245,7 @@ async function playMove(x, y) {
     handleAiMove(data.ai_move);
     stones = data.stones;
     draw();
+    if (showGameOver(data)) return;
     if (autoHint) await fetchHints();
   } finally {
     busy = false;
@@ -253,6 +254,12 @@ async function playMove(x, y) {
 
 function yourMoveText() {
   return `Your move (${myColor === 'b' ? 'Black' : 'White'})`;
+}
+
+function showGameOver(data) {
+  if (!data || !data.game_over) return false;
+  statusEl.textContent = 'Game over: ' + (data.result || 'finished');
+  return true;
 }
 
 function handleAiMove(aiMove) {
@@ -289,6 +296,7 @@ document.getElementById('passBtn').onclick = async () => {
     handleAiMove(data.ai_move);
     stones = data.stones;
     draw();
+    if (showGameOver(data)) return;
     if (autoHint) await fetchHints();
   } finally { busy = false; }
 };
@@ -438,6 +446,7 @@ async function init() {
     updateEval(data.winrate, data.score_lead);
     resize();
     statusEl.textContent = yourMoveText();
+    showGameOver(data);
   } catch (e) {
     statusEl.textContent = 'Could not restore game — starting a new one';
     await newGame(size);

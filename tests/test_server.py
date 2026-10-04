@@ -294,5 +294,29 @@ class EngineRestartTests(unittest.TestCase):
         self.assertEqual(e.sent, ["play b E5"])
 
 
+class GameOverTests(unittest.TestCase):
+    def test_two_consecutive_passes_end_game(self):
+        e = FakeGtpEngine("b", [])
+        e.passes, e.resigned = 0, False
+        e.note_move(True)
+        self.assertFalse(e.game_over)
+        e.note_move(True)
+        self.assertTrue(e.game_over)
+
+    def test_stone_resets_pass_count(self):
+        e = FakeGtpEngine("b", [])
+        e.passes, e.resigned = 0, False
+        e.note_move(True)
+        e.note_move(False)
+        e.note_move(True)
+        self.assertFalse(e.game_over)
+
+    def test_resign_ends_game(self):
+        e = FakeGtpEngine("b", [])
+        e.passes, e.resigned = 0, True
+        self.assertTrue(e.game_over)
+        self.assertIn("resigned", e.final_result())
+
+
 if __name__ == "__main__":
     unittest.main()

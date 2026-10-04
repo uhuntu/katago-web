@@ -44,6 +44,11 @@ ANALYSIS_INTERVAL_CS = 10
 engine = None
 
 
+class EngineRestarted(RuntimeError):
+    """The KataGo process died mid-request and was restarted. The restart
+    clears the board, so the interrupted command must not be replayed."""
+
+
 def get_engine():
     """Lazily start the KataGo process on first use (also keeps the module
     importable by the unit tests, which must not spawn a subprocess)."""
@@ -203,9 +208,12 @@ class Engine:
                 return self._raw_send(command)
             except (RuntimeError, OSError, ValueError):
                 # Engine died mid-request (dead stdout / broken pipe). Restart
-                # and retry the exact command once so a crash doesn't 500 the UI.
+                # so later requests work, but don't replay the command: the
+                # restart wiped the board, so replaying a play/genmove would
+                # land on an empty position and desync the UI.
                 self._ensure_process()
-                return self._raw_send(command)
+                raise EngineRestarted(
+                    "engine restarted; the game was reset, please start a new game")
 
     def _reset(self, size):
         komi = {9: 5.5, 13: 6.5}.get(size, 7.5)
@@ -226,6 +234,21 @@ class Engine:
             ai_move = self.genmove_color(opponent_color)
         self.last_black_eval = self.eval_as_black_frame(human_color)
         return ai_move
+
+    def undo_turn(self):
+        """Take back the human's last move and the AI's reply. Returns False if
+        there is nothing to undo. When the human plays White and only the AI's
+        opening move remains, that opening can't be taken back (the human
+        would be left to move first as White), so it is replayed instead."""
+        def failed(resp):
+            return not resp or resp[0].startswith("?")
+
+        with self.lock:
+            if failed(self.cmd("undo")):
+                return False
+            if failed(self.cmd("undo")) and self.human_color == "w":
+                self.genmove_color("b")
+        return True
 
     def coord_to_gtp(self, x, y):
         col = COLS[x]
@@ -386,6 +409,11 @@ def ensure_engine_started():
     get_engine()
 
 
+@app.errorhandler(EngineRestarted)
+def handle_engine_restarted(e):
+    return jsonify({"ok": False, "error": str(e)}), 409
+
+
 @app.route("/api/difficulty", methods=["GET", "POST"])
 def api_difficulty():
     if request.method == "POST":
@@ -505,8 +533,8 @@ def api_pass():
 @app.route("/api/undo", methods=["POST"])
 def api_undo():
     engine = get_engine()
-    engine.cmd("undo")
-    engine.cmd("undo")
+    if not engine.undo_turn():
+        return jsonify({"ok": False, "error": "nothing to undo"}), 400
     eval_now = engine.eval_as_black_frame(engine.human_color)
     engine.last_black_eval = eval_now
     return jsonify({

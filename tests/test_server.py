@@ -249,5 +249,50 @@ class TestLazyEngine(unittest.TestCase):
         self.assertIsNone(server.AUTH_USER)
 
 
+class FakeGtpEngine(server.Engine):
+    """Engine whose GTP pipe is a scripted list of replies."""
+
+    def __init__(self, human_color, replies):
+        self.size = 9
+        self.lock = server.threading.RLock()
+        self.human_color = human_color
+        self.replies = list(replies)
+        self.sent = []
+
+    def _ensure_process(self):
+        pass
+
+    def _raw_send(self, command):
+        self.sent.append(command)
+        r = self.replies.pop(0)
+        if isinstance(r, Exception):
+            raise r
+        return r
+
+
+class UndoTurnTests(unittest.TestCase):
+    def test_black_undoes_both_plies(self):
+        e = FakeGtpEngine("b", [["= "], ["= "]])
+        self.assertTrue(e.undo_turn())
+        self.assertEqual(e.sent, ["undo", "undo"])
+
+    def test_nothing_to_undo(self):
+        e = FakeGtpEngine("b", [["? cannot undo"]])
+        self.assertFalse(e.undo_turn())
+
+    def test_white_replays_opening_when_only_opening_left(self):
+        e = FakeGtpEngine("w", [["= "], ["? cannot undo"], ["= E5"]])
+        self.assertTrue(e.undo_turn())
+        self.assertEqual(e.sent, ["undo", "undo", "genmove b"])
+
+
+class EngineRestartTests(unittest.TestCase):
+    def test_cmd_does_not_replay_after_restart(self):
+        e = FakeGtpEngine("b", [RuntimeError("dead"), ["= "]])
+        with self.assertRaises(server.EngineRestarted):
+            e.cmd("play b E5")
+        self.assertEqual(e.sent, ["play b E5"])
+
+
 if __name__ == "__main__":
     unittest.main()

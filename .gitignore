@@ -24,3 +24,6 @@ notes/
 
 # Local agent/session state (plans, caches)
 .stepcode/
+
+# Local Windows CPU run: binary, config, local auth, engine log
+katago-win/

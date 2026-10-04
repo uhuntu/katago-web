@@ -266,7 +266,16 @@ function handleAiMove(aiMove) {
 }
 
 async function refreshBoard() {
-  // no-op placeholder if a full re-fetch is ever needed
+  // Re-sync with the server's board, e.g. after a move was rejected and the
+  // optimistic stone we drew locally turns out to be illegal (ko, suicide).
+  try {
+    const data = await api('/api/state');
+    if (data.ok) {
+      stones = data.stones || [];
+      updateEval(data.winrate, data.score_lead);
+      draw();
+    }
+  } catch (e) { /* keep the local board; the status line already shows why */ }
 }
 
 document.getElementById('passBtn').onclick = async () => {

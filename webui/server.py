@@ -9,14 +9,19 @@ from flask import Flask, Response, jsonify, request, send_from_directory
 
 AUTH_FILE = os.path.expanduser("~/katago/.auth")
 
+AUTH_USER, AUTH_PASS = None, None
+
 
 def load_auth():
-    with open(AUTH_FILE) as f:
-        user, _, pw = f.read().strip().partition(":")
-    return user, pw
-
-
-AUTH_USER, AUTH_PASS = load_auth()
+    """Reads the auth file on first use rather than at import, so this module
+    (and the unit tests that import it) load on machines that don't have
+    ~/katago/.auth — e.g. a laptop clone of the repo. __main__ calls this
+    before app.run() to keep the fail-fast-at-startup behavior."""
+    global AUTH_USER, AUTH_PASS
+    if AUTH_USER is None:
+        with open(AUTH_FILE) as f:
+            AUTH_USER, _, AUTH_PASS = f.read().strip().partition(":")
+    return AUTH_USER, AUTH_PASS
 
 KATAGO_BIN = os.path.expanduser("~/katago/src/cpp/build/katago")
 MODEL = os.path.expanduser(
@@ -75,6 +80,46 @@ def parse_showboard(lines, size):
             if ch in ("X", "O"):
                 stones.append({"x": x, "y": y, "color": "B" if ch == "X" else "W"})
     return stones
+
+
+def parse_analyze_report(report):
+    """Split one kata-analyze report line into its per-move segments and pull
+    out the fields the UI needs. Pure function so it can be unit-tested
+    without a GPU. Returns one dict per `info move` segment; "move" is always
+    present, "winrate"/"scoreLead"/"order" only when that segment had them."""
+    parsed = []
+    for seg in re.split(r"(?=info move )", report):
+        if not seg.startswith("info move "):
+            continue
+        mv = re.search(r"^info move (\S+)", seg)
+        if not mv:
+            continue
+        entry = {"move": mv.group(1)}
+        wr = re.search(r"winrate ([\d.]+)", seg)
+        if wr:
+            entry["winrate"] = float(wr.group(1))
+        sl = re.search(r"scoreLead (-?[\d.]+)", seg)
+        if sl:
+            entry["scoreLead"] = float(sl.group(1))
+        od = re.search(r"\border (\d+)", seg)
+        if od:
+            entry["order"] = int(od.group(1))
+        parsed.append(entry)
+    return parsed
+
+
+def compute_point_loss(before_black_lead, opp_score_lead, human_color):
+    """Point loss for the human's last move: the cached pre-move black-frame
+    score lead versus the score lead from an analysis run at the opponent's
+    point of view (`opp_score_lead`). Pure function so the color-frame
+    arithmetic is unit-testable without an engine."""
+    opponent_color = "w" if human_color == "b" else "b"
+    after_black_score = opp_score_lead if opponent_color == "b" else -opp_score_lead
+    if human_color == "b":
+        loss = before_black_lead - after_black_score
+    else:
+        loss = after_black_score - before_black_lead
+    return round(max(0.0, loss), 1)
 
 
 class Engine:
@@ -215,11 +260,10 @@ class Engine:
         last_report = self._analyze_last_report(color, duration, interval_cs)
         if not last_report:
             return None
-        wr = re.search(r"winrate ([\d.]+)", last_report)
-        sl = re.search(r"scoreLead (-?[\d.]+)", last_report)
-        if not wr or not sl:
-            return None
-        return {"winrate": float(wr.group(1)), "scoreLead": float(sl.group(1))}
+        for entry in parse_analyze_report(last_report):
+            if "winrate" in entry and "scoreLead" in entry:
+                return {"winrate": entry["winrate"], "scoreLead": entry["scoreLead"]}
+        return None
 
     def _analyze_last_report(self, color, duration, interval_cs):
         difficulty_visits = DIFFICULTIES[self.difficulty]["maxVisits"]
@@ -256,25 +300,17 @@ class Engine:
         last_report = self._analyze_last_report(color, duration, interval_cs)
         if not last_report:
             return []
-        segments = re.split(r"(?=info move )", last_report)
         parsed = []
-        for seg in segments:
-            if not seg.startswith("info move "):
+        for entry in parse_analyze_report(last_report):
+            if not ("winrate" in entry and "scoreLead" in entry and "order" in entry):
                 continue
-            mv = re.search(r"^info move (\S+)", seg)
-            wr = re.search(r"winrate ([\d.]+)", seg)
-            sl = re.search(r"scoreLead (-?[\d.]+)", seg)
-            od = re.search(r"\border (\d+)", seg)
-            if not (mv and wr and sl and od):
-                continue
-            move_str = mv.group(1)
-            if move_str.lower() in ("pass", "resign"):
+            if entry["move"].lower() in ("pass", "resign"):
                 continue
             parsed.append({
-                "coord": self.gtp_to_coord(move_str),
-                "winrate": float(wr.group(1)),
-                "scoreLead": float(sl.group(1)),
-                "order": int(od.group(1)),
+                "coord": self.gtp_to_coord(entry["move"]),
+                "winrate": entry["winrate"],
+                "scoreLead": entry["scoreLead"],
+                "order": entry["order"],
             })
         parsed.sort(key=lambda c: c["order"])
         return parsed[:top_n]
@@ -332,10 +368,11 @@ app = Flask(__name__, static_folder="static")
 @app.before_request
 def require_auth():
     auth = request.authorization
+    auth_user, auth_pass = load_auth()
     valid = (
         auth is not None
-        and hmac.compare_digest(auth.username or "", AUTH_USER)
-        and hmac.compare_digest(auth.password or "", AUTH_PASS)
+        and hmac.compare_digest(auth.username or "", auth_user)
+        and hmac.compare_digest(auth.password or "", auth_pass)
     )
     if not valid:
         return Response(
@@ -416,17 +453,12 @@ def _after_human_move():
     """Call after the human's move has been played (before the AI replies).
     Returns point loss for that move using the cached pre-move eval."""
     engine = get_engine()
-    before = engine.last_black_eval
     opponent_color = "w" if engine.human_color == "b" else "b"
     opp_view = engine.analyze(opponent_color)
     if opp_view is None:
         return None
-    after_black_score = opp_view["scoreLead"] if opponent_color == "b" else -opp_view["scoreLead"]
-    if engine.human_color == "b":
-        loss = before["scoreLead"] - after_black_score
-    else:
-        loss = after_black_score - before["scoreLead"]
-    return round(max(0.0, loss), 1)
+    return compute_point_loss(
+        engine.last_black_eval["scoreLead"], opp_view["scoreLead"], engine.human_color)
 
 
 def _after_ai_move():
@@ -434,6 +466,21 @@ def _after_ai_move():
     engine = get_engine()
     engine.last_black_eval = engine.eval_as_black_frame(engine.human_color)
     return engine.last_black_eval
+
+
+def _finish_turn():
+    """Shared tail of /api/move and /api/pass: score the human's move, let the
+    AI reply, refresh the cached eval. Returns the response payload fields."""
+    engine = get_engine()
+    point_loss = _after_human_move()
+    opponent_color = "w" if engine.human_color == "b" else "b"
+    ai_move = engine.genmove_color(opponent_color)
+    eval_now = _after_ai_move()
+    return {
+        "ai_move": ai_move, "stones": engine.board(),
+        "point_loss": point_loss, "winrate": eval_now["winrate"],
+        "score_lead": eval_now["scoreLead"],
+    }
 
 
 @app.route("/api/move", methods=["POST"])
@@ -445,30 +492,14 @@ def api_move():
     resp = engine.cmd(f"play {engine.human_color} {gtp_coord}")
     if resp and resp[0].startswith("?"):
         return jsonify({"ok": False, "error": resp[0]}), 400
-    point_loss = _after_human_move()
-    opponent_color = "w" if engine.human_color == "b" else "b"
-    ai_move = engine.genmove_color(opponent_color)
-    eval_now = _after_ai_move()
-    return jsonify({
-        "ok": True, "ai_move": ai_move, "stones": engine.board(),
-        "point_loss": point_loss, "winrate": eval_now["winrate"],
-        "score_lead": eval_now["scoreLead"],
-    })
+    return jsonify({"ok": True, **_finish_turn()})
 
 
 @app.route("/api/pass", methods=["POST"])
 def api_pass():
     engine = get_engine()
     engine.cmd(f"play {engine.human_color} pass")
-    point_loss = _after_human_move()
-    opponent_color = "w" if engine.human_color == "b" else "b"
-    ai_move = engine.genmove_color(opponent_color)
-    eval_now = _after_ai_move()
-    return jsonify({
-        "ok": True, "ai_move": ai_move, "stones": engine.board(),
-        "point_loss": point_loss, "winrate": eval_now["winrate"],
-        "score_lead": eval_now["scoreLead"],
-    })
+    return jsonify({"ok": True, **_finish_turn()})
 
 
 @app.route("/api/undo", methods=["POST"])
@@ -493,5 +524,6 @@ def api_score():
 
 
 if __name__ == "__main__":
-    get_engine()  # fail fast at startup if the binary/model/auth are missing
+    load_auth()  # fail fast at startup if the auth file is missing
+    get_engine()  # fail fast at startup if the binary/model are missing
     app.run(host="0.0.0.0", port=8765, threaded=False)

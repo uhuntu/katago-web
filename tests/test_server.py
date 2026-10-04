@@ -1,8 +1,9 @@
 """Unit tests for the pure helpers in webui/server.py.
 
-No GPU or KataGo binary needed: coordinate conversion and `showboard` parsing
-are plain functions, and the engine is created lazily so importing the module
-under test does not spawn a subprocess.
+No GPU, KataGo binary, or auth file needed: coordinate conversion,
+`showboard` parsing, kata-analyze report parsing and point-loss math are
+plain functions, and the engine/auth file are both set up lazily so
+importing the module under test spawns nothing and reads nothing.
 
 Run from the repo root:
     webui-venv/bin/python -m unittest discover -s tests -v
@@ -127,11 +128,125 @@ class TestParseShowboard(unittest.TestCase):
         self.assertEqual(server.parse_showboard([], 9), [])
 
 
+class TestParseAnalyzeReport(unittest.TestCase):
+    # Shaped like a real kata-analyze report: several info-move segments per
+    # line, each ending in its pv before the next `info move`.
+    TWO_MOVES = (
+        "info move D4 visits 45 utility 0.02 winrate 0.514 scoreLead 0.6 "
+        "prior 0.31 order 0 pv D4 Q16 "
+        "info move Q16 visits 30 utility -0.01 winrate 0.486 scoreLead -0.6 "
+        "prior 0.22 order 1 pv Q16 D4"
+    )
+
+    def test_two_moves_all_fields(self):
+        entries = server.parse_analyze_report(self.TWO_MOVES)
+        self.assertEqual(entries, [
+            {"move": "D4", "winrate": 0.514, "scoreLead": 0.6, "order": 0},
+            {"move": "Q16", "winrate": 0.486, "scoreLead": -0.6, "order": 1},
+        ])
+
+    def test_negative_score_lead(self):
+        entries = server.parse_analyze_report(
+            "info move Q16 winrate 0.4 scoreLead -12.5 order 0")
+        self.assertEqual(entries[0]["scoreLead"], -12.5)
+
+    def test_pass_is_just_a_move_to_the_parser(self):
+        # pass/resign filtering is candidates()'s job, not the parser's.
+        entries = server.parse_analyze_report(
+            "info move pass winrate 0.1 scoreLead -3.0 order 0")
+        self.assertEqual(entries, [{"move": "pass", "winrate": 0.1,
+                                    "scoreLead": -3.0, "order": 0}])
+
+    def test_segment_missing_optional_fields_still_listed(self):
+        entries = server.parse_analyze_report("info move E5 visits 3")
+        self.assertEqual(entries, [{"move": "E5"}])
+
+    def test_text_before_first_segment_ignored(self):
+        entries = server.parse_analyze_report("= info move D4 order 0")
+        self.assertEqual(entries, [{"move": "D4", "order": 0}])
+
+    def test_garbage_returns_empty(self):
+        self.assertEqual(server.parse_analyze_report(""), [])
+        self.assertEqual(server.parse_analyze_report("hello world"), [])
+        self.assertEqual(server.parse_analyze_report("pv D4 Q16 only"), [])
+
+
+class TestCandidatesAndAnalyze(unittest.TestCase):
+    # All moves must exist on a 9x9 board (the stub engine's size): E5 and D4.
+    REPORT = (
+        "info move E5 winrate 0.4 scoreLead -2.0 order 1 pv E5 D4 "
+        "info move pass winrate 0.1 scoreLead -9.0 order 2 "
+        "info move D4 winrate 0.6 scoreLead 1.5 order 0 pv D4 E5"
+    )
+
+    def make_analyzing_stub(self, report):
+        e = make_engine_stub(9)
+        e._analyze_last_report = lambda *a, **k: report
+        return e
+
+    def test_candidates_sort_filter_convert(self):
+        # Input line is not in order sequence: D4 (order 0) must come first,
+        # the pass candidate must be dropped, coords converted to x/y grid.
+        cands = self.make_analyzing_stub(self.REPORT).candidates("b")
+        self.assertEqual([(c["coord"], c["order"]) for c in cands], [
+            ({"x": 3, "y": 5}, 0),   # D4
+            ({"x": 4, "y": 4}, 1),   # E5
+        ])
+
+    def test_candidates_top_n(self):
+        cands = self.make_analyzing_stub(self.REPORT).candidates("b", top_n=1)
+        self.assertEqual(len(cands), 1)
+        self.assertEqual(cands[0]["coord"], {"x": 3, "y": 5})
+
+    def test_analyze_takes_first_reported_move(self):
+        # analyze() reads the report's lead move as-is (real reports lead with
+        # the engine's best move); it does not re-rank by `order`.
+        result = self.make_analyzing_stub(self.REPORT).analyze("b")
+        self.assertEqual(result, {"winrate": 0.4, "scoreLead": -2.0})
+
+    def test_analyze_none_when_no_report(self):
+        self.assertIsNone(self.make_analyzing_stub("").analyze("b"))
+
+    def test_eval_as_black_frame_converts_white_view(self):
+        e = make_engine_stub(9)
+        e.analyze = lambda color: {"winrate": 0.3, "scoreLead": -2.0}
+        self.assertEqual(e.eval_as_black_frame("b"),
+                         {"winrate": 0.3, "scoreLead": -2.0})
+        self.assertEqual(e.eval_as_black_frame("w"),
+                         {"winrate": 0.7, "scoreLead": 2.0})
+
+
+class TestComputePointLoss(unittest.TestCase):
+    def test_human_black(self):
+        # Before: Black leads by 5. After the move, an analysis from White's
+        # point of view (scoreLead +3.0 = White leads by 3, i.e. Black -3 in
+        # the black frame): the move cost 8 points.
+        self.assertEqual(server.compute_point_loss(5.0, 3.0, "b"), 8.0)
+
+    def test_human_white(self):
+        # Before: Black leads by 2. After, Black leads by 4: White lost 2.
+        self.assertEqual(server.compute_point_loss(2.0, 4.0, "w"), 2.0)
+
+    def test_negative_loss_clamped_to_zero(self):
+        # Before: Black leads by 1. After, Black leads by 2 — from White's
+        # point of view that's scoreLead -2.0. A "gain" (noise or the
+        # opponent slipping) must not show as negative loss.
+        self.assertEqual(server.compute_point_loss(1.0, -2.0, "b"), 0.0)
+
+    def test_rounded_to_one_decimal(self):
+        self.assertEqual(server.compute_point_loss(1.23, 2.0, "w"), 0.8)
+
+
 class TestLazyEngine(unittest.TestCase):
     def test_import_does_not_spawn_engine(self):
         # The module-level engine must stay None until the first request, so
         # this test file can import server.py without KataGo running.
         self.assertIsNone(server.engine)
+
+    def test_import_does_not_read_auth(self):
+        # The auth file is likewise read on first use, not at import, so this
+        # suite runs on machines without ~/katago/.auth.
+        self.assertIsNone(server.AUTH_USER)
 
 
 if __name__ == "__main__":

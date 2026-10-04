@@ -90,7 +90,7 @@ $env:KATAGO_ENGINE_LOG="katago-win\engine.log"; $env:KATAGO_HOST="127.0.0.1"
 python webui\server.py     # then open http://127.0.0.1:8765
 ```
 
-Optional: `KATAGO_PORT` (default 8765). Stick to 9x9 on CPU.
+Optional: `KATAGO_PORT` (default 8765); `KATAGO_NO_AUTH=1` skips the login (only allowed with `KATAGO_HOST=127.0.0.1`, which is handy for the VS Code preview pane — don't put credentials in the URL, browsers then refuse `fetch()`). Stick to 9x9 on CPU.
 
 ## Features
 

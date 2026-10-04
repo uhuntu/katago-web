@@ -14,6 +14,9 @@ def _env_path(name, default):
 AUTH_FILE = _env_path("KATAGO_AUTH_FILE", "~/katago/.auth")
 
 AUTH_USER, AUTH_PASS = None, None
+# Opt-in local-only mode: skip Basic Auth. Honored only when the server binds
+# to loopback (enforced in __main__), so it can't be exposed by accident.
+NO_AUTH = os.environ.get("KATAGO_NO_AUTH") == "1"
 
 
 def load_auth():
@@ -419,6 +422,8 @@ app = Flask(__name__, static_folder="static")
 
 @app.before_request
 def require_auth():
+    if NO_AUTH:
+        return None
     auth = request.authorization
     auth_user, auth_pass = load_auth()
     valid = (
@@ -598,7 +603,11 @@ def api_score():
 
 
 if __name__ == "__main__":
-    load_auth()  # fail fast at startup if the auth file is missing
+    host = os.environ.get("KATAGO_HOST", "0.0.0.0")
+    if NO_AUTH and host not in ("127.0.0.1", "localhost", "::1"):
+        raise SystemExit("KATAGO_NO_AUTH=1 requires KATAGO_HOST=127.0.0.1")
+    if not NO_AUTH:
+        load_auth()  # fail fast at startup if the auth file is missing
     get_engine()  # fail fast at startup if the binary/model are missing
-    app.run(host=os.environ.get("KATAGO_HOST", "0.0.0.0"),
+    app.run(host=host,
             port=int(os.environ.get("KATAGO_PORT", "8765")), threaded=False)

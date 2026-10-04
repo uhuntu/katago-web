@@ -69,6 +69,29 @@ webui-venv/bin/python webui/server.py
 Serves on `0.0.0.0:8765`. Open `http://<this-machine's-LAN-or-Tailscale-IP>:8765`
 from your phone's browser.
 
+## Running locally (Windows, CPU)
+
+No GPU needed: use the Eigen (CPU) release and a small net. On a Celeron
+N5105 the b18c384nbt net managed ~2 visits/s on 19x19 (too slow); the old
+`g170e-b10c128` net does ~70 visits/s on 9x9, which is fine for play + hints.
+
+```bash
+gh release download v1.18.1 -R lightvector/KataGo -p 'katago-v1.18.1-eigen-windows-x64.zip'
+# unzip into katago-win/; net: https://katagoarchive.org/g170/neuralnets/g170e-b10c128-s1141046784-d204142634.bin.gz
+# (send a browser User-Agent, the hosts 403 the default Python/curl-less ones)
+sed 's/^numSearchThreads *=.*/numSearchThreads = 4/' katago-win/default_gtp.cfg > katago-win/gtp-local.cfg
+echo 'me:some-password' > katago-win/.auth
+```
+
+```powershell
+$env:KATAGO_BIN="katago-win\katago.exe"; $env:KATAGO_MODEL="models\g170e-b10c128.bin.gz"
+$env:KATAGO_CONFIG="katago-win\gtp-local.cfg"; $env:KATAGO_AUTH_FILE="katago-win\.auth"
+$env:KATAGO_ENGINE_LOG="katago-win\engine.log"; $env:KATAGO_HOST="127.0.0.1"
+python webui\server.py     # then open http://127.0.0.1:8765
+```
+
+Optional: `KATAGO_PORT` (default 8765). Stick to 9x9 on CPU.
+
 ## Features
 
 - **Play**: tap to place stones as Black; KataGo (White) replies automatically.

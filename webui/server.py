@@ -7,7 +7,11 @@ import time
 
 from flask import Flask, Response, jsonify, request, send_from_directory
 
-AUTH_FILE = os.path.expanduser("~/katago/.auth")
+def _env_path(name, default):
+    return os.path.expanduser(os.environ.get(name, default))
+
+
+AUTH_FILE = _env_path("KATAGO_AUTH_FILE", "~/katago/.auth")
 
 AUTH_USER, AUTH_PASS = None, None
 
@@ -23,12 +27,13 @@ def load_auth():
             AUTH_USER, _, AUTH_PASS = f.read().strip().partition(":")
     return AUTH_USER, AUTH_PASS
 
-KATAGO_BIN = os.path.expanduser("~/katago/src/cpp/build/katago")
-MODEL = os.path.expanduser(
-    "~/katago/models/kata1-b28c512nbt-s13255194368-d5935380940.bin.gz"
-)
-CONFIG = os.path.expanduser("~/katago/gtp.cfg")
-ENGINE_LOG = os.path.expanduser("~/katago/gtp_logs/engine.log")
+# Each path can be overridden by an env var so the same server runs on the
+# Linux box (defaults) and on a laptop (see README, "Running locally").
+KATAGO_BIN = _env_path("KATAGO_BIN", "~/katago/src/cpp/build/katago")
+MODEL = _env_path(
+    "KATAGO_MODEL", "~/katago/models/kata1-b28c512nbt-s13255194368-d5935380940.bin.gz")
+CONFIG = _env_path("KATAGO_CONFIG", "~/katago/gtp.cfg")
+ENGINE_LOG = _env_path("KATAGO_ENGINE_LOG", "~/katago/gtp_logs/engine.log")
 COLS = "ABCDEFGHJKLMNOPQRSTUVWXYZ"
 
 DIFFICULTIES = {
@@ -132,6 +137,7 @@ class Engine:
         self.lock = threading.RLock()
         self.size = 9
         self.proc = None
+        os.makedirs(os.path.dirname(ENGINE_LOG), exist_ok=True)
         self.log = open(ENGINE_LOG, "a")
         self.difficulty = DEFAULT_DIFFICULTY
         self.human_color = "b"
@@ -594,4 +600,5 @@ def api_score():
 if __name__ == "__main__":
     load_auth()  # fail fast at startup if the auth file is missing
     get_engine()  # fail fast at startup if the binary/model are missing
-    app.run(host="0.0.0.0", port=8765, threaded=False)
+    app.run(host=os.environ.get("KATAGO_HOST", "0.0.0.0"),
+            port=int(os.environ.get("KATAGO_PORT", "8765")), threaded=False)

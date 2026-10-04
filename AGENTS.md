@@ -51,21 +51,34 @@ a fixed port): `pgrep -af server.py`. Kill with `pkill -f "webui/server.py"`.
 
 ## Remote access
 
-- LAN: `http://10.11.17.36:8765`
+- LAN: `http://10.11.108.35:8765`. The box's primary NIC (eno1) moved to the
+  10.11.108.0/24 network; the old 10.11.17.x address survives only on a USB
+  ethernet adapter (`enx00e03c3604ad`, now 10.11.17.25) — don't use it.
+- SSH hop when you can reach 241 but have no direct route to the box (e.g.
+  AnyConnect split-tunnel lists 10.11.108.241 but not .35): `ssh -L
+  8765:10.11.108.35:8765 10.11.108.241`, then open `http://localhost:8765`.
+  Nested `ssh 10.11.108.241 'ssh hunt@10.11.108.35 ...'` works for shell.
 - Tailscale (works from any network, no VPN app needed on the client since
   Funnel makes it a real public HTTPS URL): `https://hunt-optiplex-7071.tail187bfc.ts.net/`
   Toggle off with `tailscale funnel --https=443 off`.
 - SSH reverse tunnel via 10.11.108.241 (reachable from any device on that
-  VPN, plain HTTP — no TLS): `http://10.11.108.241:8765/`. Independent of
+  LAN/VPN, plain HTTP — no TLS): `http://10.11.108.241:8765/`. Independent of
   Tailscale, so it's a fallback if Funnel/its DNS misbehaves. Backed by the
-  `reverse-241.service` systemd user unit (`ssh -NT 10.11.108.241`,
-  `Restart=always`), which reads the `RemoteForward 0.0.0.0:8765
-  localhost:8765` line in `~/.ssh/config`'s `Host 10.11.108.241` block. The
-  explicit `0.0.0.0:` bind is required — that host's sshd has `GatewayPorts
-  clientspecified`, so an unqualified `RemoteForward 8765 ...` would silently
-  bind loopback-only and not be reachable from other devices. The existing
-  `7897`/`3390` forwards on that same host intentionally stay loopback (no
-  bind address given), so don't add one there either.
+  `reverse-241.service` systemd user unit (`ssh -NT 241-tunnel`,
+  `Restart=always`); the forwards live in the box's `~/.ssh/config` `Host
+  241-tunnel` block (split off the interactive host on 2026-10-01 to stop
+  ControlPersist flapping). That block must carry `RemoteForward 0.0.0.0:8765
+  localhost:8765` — the split accidentally dropped it, and the tunnel ran 3
+  days with no 8765 listener while still showing "active" (re-added
+  2026-10-04; `ss -tln | grep 8765` on 241 is the real health check, not the
+  unit status). The explicit `0.0.0.0:` bind is required — 241's sshd has
+  `GatewayPorts clientspecified`; the block's other forwards
+  (7897/3389/3390/2222) intentionally stay loopback.
+  `loginctl enable-linger hunt` is enabled (2026-10-04) so the user unit
+  starts at boot without a login session. From clients reaching 241 over the
+  corporate VPN, only port 22 passes (8765/3390 time out even though the
+  listener is up) — tunnel over SSH instead: `ssh -L
+  8765:10.11.108.35:8765 10.11.108.241`.
   Same trick would work via 10.200.7.149, but that host's sshd doesn't have
   `GatewayPorts` set (defaults to `no`) — needs `GatewayPorts clientspecified`
   added to `/etc/ssh/sshd_config` there (needs root) before a forward on it

@@ -49,6 +49,13 @@ cd ~/katago && webui-venv/bin/python webui/server.py
 Check if the web server's already running before starting another (it binds
 a fixed port): `pgrep -af server.py`. Kill with `pkill -f "webui/server.py"`.
 
+A second instance can also run on the Windows machine itself — loopback-only
+(http://127.0.0.1:8765, KATAGO_NO_AUTH), engine in `katago-win/` (v1.18.1
+Eigen) with the small `models/g170e-b10c128.bin.gz` net, since b18/b28 are
+too slow on that Celeron. See README "Running locally (Windows, CPU)" for
+the start commands. If you find 8765 answering 200 without auth from that
+box, it's this instance, not the OptiPlex one.
+
 ## Remote access
 
 - LAN: `http://10.11.108.35:8765`. The box's primary NIC (eno1) moved to the
